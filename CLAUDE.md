@@ -18,6 +18,25 @@
   operating-rules summary; put the actual detail (what changed, why, defaults) in README.md.
 
 ## EA rules
+
+### v5.7 (current) — what changed in the rules
+- v5.7 removed the weighted score, the entire reversal engine, the pullback wait timer, the
+  adaptive profit manager, the calendar filter and partial close. **The following older rules are
+  now historical, kept only so the reasoning behind past changes isn't lost:**
+  `InpRequireCandleConfirm`, `InpMinSignalScore` + the "never reweight the 8 components" rule,
+  `InpProtectiveStopPoints` / `ComputeBasketRiskUSD()` (replaced by `ComputeStopTarget()` +
+  `RiskUSD()`), `InpMaxConsecutiveReversals`, `InpReversalCooldownSeconds`, `InpLossThresholdUSD`
+  and the profit/trail inputs, `InpUseCalendarFilter`.
+- The `InpMaxBasketRiskUSD` sanity-check rule still applies, just against the new ATR-based stop:
+  whenever `InpBasketMax`, `InpFixedLotSize`, `InpStopATRMult` or `InpTargetATRMult` change, verify
+  the cap still comfortably covers the computed basket risk.
+- **Exits are fixed 0.5 R** (`InpStopATRMult=1.50` / `InpTargetATRMult=0.75`), SL and TP sent with
+  every order. Do not reintroduce a USD-denominated profit target or trail — the measured history
+  (56.8% basket WR vs the 66.7% breakeven that shape needs) is why they were removed.
+- Loss closes never reverse: `RouteAfterClose()` always returns to `STATE_WAITING_SIGNAL`.
+  Reintroducing a reversal path needs a measured reason, not a default.
+
+### Still binding (from earlier versions)
 - DEMO accounts only. The demo-account guard in `OnInit` must never be removed, weakened or bypassed.
 - Basket engine (v3.05+): 10-20 same-direction positions open, trail, close and reverse as ONE unit. All $ exit values are per 0.01 lot and scale with basket volume.
 - Lot starts at 0.01 and may grow up to a 0.50 per-position hard cap, but ONLY after winning baskets; any losing basket resets lot and basket size to the minimum. Never increase size after a loss (no martingale). The user explicitly lifted the old 0.01 cap on 2026-11-03.

@@ -1,6 +1,6 @@
-# Smart Reversal EA v5.6
+# Smart Reversal EA v5.7
 
-**File:** `SmartHedgeEA_v5.6.mq5` / `SmartHedgeEA_v5.6.ex5`
+**File:** `SmartHedgeEA_v5.7.mq5` / `SmartHedgeEA_v5.7.ex5`
 **Platform:** MetaTrader 5, MQL5
 **Copyright:** Sachin Dev Bots
 
@@ -12,26 +12,26 @@
 
 ## What it does
 
-A single-symbol, basket-based reversal EA. It opens a fixed-size basket of same-direction
-positions, manages it as one unit (trailing, break-even, max holding time, optional partial
-close), closes it, and may open an opposite-direction basket afterward — but only after a full
-re-evaluation of the market, never a blind reversal.
+A single-symbol, basket-based EA. It opens a fixed-size basket of same-direction positions with a
+**stop-loss and take-profit attached to every order**, manages the basket as one unit, closes it on
+SL/TP/time-stop, and then waits for a genuinely fresh signal. v5.7 does **not** reverse after a loss.
 
-v5.0 replaces the old single EMA-cross signal (v4.8 and earlier) with a dual market-regime
-engine:
+The signal side is the same dual-regime classifier as v5.0-v5.6, with the 8-component weighted
+score removed:
 
-- **MODE A — Trend Continuation**: H1 + M15 + M5 EMA trend agreement, ADX trend-strength
-  confirmation, a pullback/anti-chase filter, and closed-candle confirmation.
-- **MODE B — Range Mean Reversion**: swing-based support/resistance zones, RSI extremes or a
-  rejection candle at the boundary, and a minimum reward:risk space check to the opposite
-  boundary.
-- **MODE C — No-Trade**: the deliberate default whenever regime, data, risk, or score checks
-  don't clear the bar. Logged like any other decision, never silently skipped.
+- **MODE A — Trend Continuation**: H1 + M15 + M5 EMA agreement (ADX confirms trend strength),
+  an RSI momentum gate, a hard anti-chase gate (last close must be within `InpMaxChaseATR` of the
+  fast EMA — no timer, no forced entry), and a closed-candle confirmation.
+- **MODE B — Range Mean Reversion**: swing-based support/resistance zones, price within
+  `InpRangeZoneATR` of the near boundary, and an RSI extreme **or** a rejection candle at it.
+- **MODE C — No-Trade**: the deliberate default whenever regime, data, spread, session or risk
+  checks don't clear. Logged like any other decision, never silently skipped.
 
-A weighted 0-100 score (8 components, minimum 80 by default) gates every entry **and** every
-reversal — the reversal path runs through the exact same evaluation function used for a fresh
-entry, so a reversal requires a genuinely re-confirmed opposite setup, not just "the old signal
-hasn't been cancelled yet."
+**Exits are a fixed 0.5 R shape**: SL = `InpStopATRMult` × ATR (default 1.50), TP =
+`InpTargetATRMult` × ATR (default 0.75), both sent with the order so they survive an EA or
+terminal outage, plus an optional break-even arm at `InpBreakEvenR` and a time stop. That shape
+needs a **66.7% win rate to break even** — the old USD-denominated trail (-$0.50 loss vs +$0.25
+arm, breakeven 66.7%) ran at 56.8% over the account's whole history.
 
 ## What's preserved from earlier versions, unchanged
 
@@ -212,6 +212,62 @@ Cosmetic only: the MARKET section's "Last rejection" line now also refreshes whe
 ambiguous/`NONE` (MODE C), instead of possibly keeping a stale MODE A/B reason from before the
 regime changed. No trading logic changed.
 
+## New in v5.7
+
+A deliberate de-scoping. The execution core is untouched; everything measured to be dead weight or
+actively harmful is gone. 3092 lines → **2682 lines**.
+
+### Fixed
+
+- **Exit shape is now a real 0.5 R.** `SL = InpStopATRMult × ATR`, `TP = InpTargetATRMult × ATR`,
+  both sent **with the order**, so the shape survives an EA/terminal outage. Breakeven WR for 0.5 R
+  is 66.7%; the old shape (-0.50 loss vs +0.25 trail arm) also needed 66.7% but never got there —
+  the account's lifetime history ran **56.8% baskets / 52.0% positions, net -24.53, PF 0.95**.
+- **Lifetime basket stats are rebuilt on first run** (`ReconstructLifetimeFromHistory()`), so the
+  dashboard's LIFETIME position line and basket line finally agree — v5.6 only ever rebuilt
+  positions, never baskets.
+- **Close reason for broker-side exits comes from the closing deal's `DEAL_REASON`**
+  (`DEAL_REASON_SL`/`DEAL_REASON_TP`), not from guessing at prices — a break-even stop would
+  otherwise be mislabelled.
+
+### Removed
+
+- **The 8-component weighted 0-100 score** and `InpMinSignalScore`/`InpWeight*`. Two stacked
+  gates per regime replace it. Measured: v5.0-v5.6 evaluated **21,332 times and accepted 2
+  (0.009%)**; the score gate alone was 42.1% of all rejections (8,981), and 85.1% of evaluations
+  passed at threshold 70 while only 18.9% passed at 80.
+- **The entire reversal engine**: `STATE_REVERSAL_PENDING`, reversal cooldown, reversal confirm
+  hold, `InpMaxConsecutiveReversals`, `InpReversalCooldownSeconds`, `CLOSE_REASON_LOSS_REVERSAL`,
+  `InpMaxRevHalt`. A loss close now always returns to `STATE_WAITING_SIGNAL` for a fresh signal.
+  `LOSS_REVERSAL` was the single most frequent loss reason in the v3.x/v4.x history.
+- **The pullback wait timer** (`InpUsePullbackFilter`, `InpMaxPullbackWaitMin`,
+  `g_pullbackWaitSince`). It was dead code: the timer globals were never written to
+  `SavePersistentState()` (every reattach wiped the 75-minute clock) and any single tick back
+  inside the zone zeroed it — **zero "Pullback wait timed out" releases exist in the whole log
+  history**. Replaced by a plain hard gate, `InpMaxChaseATR` (**0.75**): too far from the fast EMA
+  = no trade, no timer, no forced entry.
+- **The adaptive profit manager**: `InpLossThresholdUSD`, `InpProfitMinUSD`,
+  `InpProfitTargetUSD`, `InpTrailGivebackUSD`, `InpBreakEvenTriggerUSD`, `InpUseATRTrailing`,
+  `InpATRTrailMultiple`, peak/trough per unit, `InpPartialClose*`.
+- **The economic-calendar filter** (`InpUseCalendarFilter` and friends) — native MQL5 API, never
+  reliably populated, failed open anyway.
+- **The score columns in the decision CSV** (schema is now direction/regime/mode/TF
+  directions/RSI/ADX/ATR/spread/accepted/reason).
+
+### Kept, unchanged
+
+Demo guard first in `OnInit` (then `g_state = STATE_INITIALIZING`), state machine + transition
+table, symbol+magic position scan reconciled against real broker positions, retcode-aware orders,
+`InpMaxBasketRiskUSD = 30.00`, the daily realized-loss halt, `InpLogDecisions = false` (one CSV
+per run by default), the `[DECISION]` print throttle, the 9pt/11pt fixed dashboard fonts, the
+instance lock.
+
+### Not changed by any of this
+
+No code change can force a specific win rate. The ATR multiples are starting values, not
+statistically proven optima, and **no backtest or forward test has ever been run for v5.0+** —
+including this version.
+
 ## Default configuration (controlled risk mode)
 
 | Setting | Default |
@@ -221,8 +277,9 @@ regime changed. No trading logic changed.
 | Lot per position (fixed) | 0.01 |
 | Max basket volume | 0.05 lots |
 | Automatic growth / random sizing / martingale | all disabled |
-| Max consecutive reversals | 2 |
-| Minimum signal score | 80 / 100 |
+| Stop / target | 1.50 × ATR / 0.75 × ATR (0.5 R, placed with the order) |
+| Break-even arm | 0.30 R |
+| Max holding time | 240 minutes |
 | Daily realized-loss limit | ON, 5.00 |
 | Demo-only execution | mandatory, cannot be bypassed |
 
@@ -239,42 +296,32 @@ All inputs have safe defaults; **bold** = shipped default.
 **Regime classifier** — `InpADXPeriod` (**14**), `InpADXTrendMin` (**22.0**), `InpADXRangeMax`
 (**18.0**) — ADX between the two thresholds is ambiguous and falls through to no-trade.
 
-**ATR volatility intelligence** — `InpATRPeriod` (**14**), `InpATRNormalLookback` (**50**),
+**ATR volatility band** — `InpATRPeriod` (**14**), `InpATRNormalLookback` (**50**),
 `InpATRMinRatio` (**0.4**), `InpATRMaxRatio` (**3.0**).
 
-**RSI momentum** — `InpRSIPeriod` (**14**); `InpRSIBuyMin`/`InpRSISellMax` (**50/50**, MODE A
-hard gate); `InpRSIOversold`/`InpRSIOverbought` (**30/70**, MODE B extreme gate).
+**RSI** — `InpRSIPeriod` (**14**); `InpRSIBuyMin`/`InpRSISellMax` (**50/50**, MODE A hard gate);
+`InpRSIOversold`/`InpRSIOverbought` (**30/70**, MODE B extreme gate).
 
-**MODE A pullback/anti-chase** — `InpUsePullbackFilter` (**true**), `InpMaxChaseATR` (**1.0**),
-`InpRequireCandleConfirm` (**false** as of v5.2 — set `true` for the stricter/slower entry
-filter), `InpMaxPullbackWaitMin` (**75**, 0 = wait forever).
+**MODE A pullback gate (hard, no timer)** — `InpMaxChaseATR` (**0.75**): the last closed entry-TF
+close may be at most this many ATRs beyond the fast EMA, or the candidate is rejected.
 
-**MODE B range mean reversion** — `InpSwingLookback` (**50**), `InpZoneClusterATR` (**0.5**),
-`InpRangeZoneATR` (**0.6**), `InpMinRewardRiskRatio` (**1.5**).
+**MODE B range boundaries** — `InpSwingLookback` (**50**), `InpZoneClusterATR` (**0.5**),
+`InpRangeZoneATR` (**0.6**).
 
-**Weighted scoring** — `InpWeightH1/M15/M5/RSI/ADX/ATR/Candle/Pullback`
-(**20/15/15/10/10/10/10/10**, re-normalized to 0-100 if changed); `InpMinSignalScore` (**70** as of
-v5.4, was 80 — see "New in v5.4").
-
-**Basket exits** (per 0.01 lot, scaled by basket volume) — `InpLossThresholdUSD` (**0.10**),
-`InpProfitMinUSD` (**0.05**), `InpProfitTargetUSD` (**1.00**), `InpTrailGivebackUSD` (**0.05**),
-`InpMaxConsecutiveReversals` (**2**).
-
-**Adaptive profit manager** — `InpBreakEvenTriggerUSD` (**0.20**), `InpUseATRTrailing`
-(**true**), `InpATRTrailMultiple` (**1.5**), `InpMaxHoldingMinutes` (**240**, 0 = no limit),
-`InpPartialCloseEnabled` (**false**), `InpPartialCloseFraction` (**0.5**),
-`InpPartialCloseTriggerUSD` (**0.30**).
+**Exits: fixed 0.5 R (SL and TP placed with the order)** — `InpStopATRMult` (**1.50**),
+`InpTargetATRMult` (**0.75**), `InpBreakEvenR` (**0.30**, 0 = off — moves SL to entry once price
+is this fraction of the risk distance in favour), `InpMaxHoldingMinutes` (**240**, 0 = no limit).
 
 **Basket size & lot (fixed, no growth)** — `InpBasketMax` (**5**), `InpFixedLotSize` (**0.01**),
 `InpMaxLotSize` (**0.50**), `InpMaxBasketVolume` (**0.05**).
 
 **Independent risk engine** (pre-entry gates, never force-close an open basket) —
-`InpMaxBasketRiskUSD` (**30.00** as of v5.5, was 5.00 — see "New in v5.5"), `InpMaxBasketRiskPctEquity` (**2.0**),
+`InpMaxBasketRiskUSD` (**30.00**), `InpMaxBasketRiskPctEquity` (**2.0**),
 `InpMaxDailyFloatingDrawdownUSD` (**20.00**), `InpMaxAccountDrawdownPct` (**20.0**),
-`InpMaxMarginUsagePct` (**50.0**).
-
-**Protective stop** — `InpProtectiveStopPoints` (**500**) — a wide backstop, not a fixed-money
-guarantee.
+`InpMaxMarginUsagePct` (**50.0**). **Whenever `InpBasketMax`, `InpFixedLotSize` or the ATR stop
+multiplier change, re-check that `InpMaxBasketRiskUSD` still comfortably covers the resulting
+basket risk** — a cap lower than the thing it gates fails silently, looking like a normal
+risk-engine decline (this was the v5.5 bug).
 
 **Daily risk protections** — `InpDailyLossLimitEnabled` (**true**), `InpDailyLossLimitUSD`
 (**5.00**, realized loss only, sticky for the rest of the broker day); `InpMaxSpreadPoints`
@@ -285,30 +332,24 @@ guarantee.
 before enabling; this PC's server time is ~3h45m behind local time), `InpSessionStartHour`
 (**7**), `InpSessionEndHour` (**21**), server time.
 
-**Economic calendar filter** — `InpUseCalendarFilter` (**false**, native MQL5 Calendar API
-only, fails open if unavailable), `InpCalendarBlockMinutesBefore`/`After` (**15/15**),
-`InpCalendarMinImportance` (**2**).
+**Timing** — `InpStartDelaySeconds` (**3**), `InpEntryConfirmSeconds` (**4**, a signal must hold
+this long before a basket opens), `InpOperationTimeoutSeconds` (**30**).
 
-**Reversal logic** — `InpReversalCooldownSeconds` (**10**), `InpEntryConfirmSeconds` (**4**),
-`InpReversalConfirmSeconds` (**4**).
-
-**Timing / misc / logging / dashboard** — `InpStartDelaySeconds` (**3**),
-`InpPostProfitWaitSeconds` (**3**), `InpOperationTimeoutSeconds` (**30**); `InpMagicNumber`
-(**20261103**), `InpTradeComment` (**SmartReversalEA**); `InpLogToCSV` (**true**),
-`InpLogCommonFolder` (**false**), `InpLogAlsoToExpertsTab` (**true**), `InpLogSubFolder`
-(**SachinDevBotsLog**), `InpLogDecisions` (**false**, turn on only for the extra per-evaluation
-decision CSV); `InpShowDashboard` (**true**).
+**Misc / logging / dashboard** — `InpMagicNumber` (**20261103**), `InpTradeComment`
+(**SmartReversalEA**); `InpLogToCSV` (**true**), `InpLogCommonFolder` (**false**),
+`InpLogAlsoToExpertsTab` (**true**), `InpLogSubFolder` (**SachinDevBotsLog**), `InpLogDecisions`
+(**false**, turn on only for the extra per-evaluation decision CSV); `InpShowDashboard` (**true**).
 
 ## Install
 
-1. In MT5: **File → Open Data Folder → MQL5 → Experts**, and copy `SmartHedgeEA_v5.6.mq5`
+1. In MT5: **File → Open Data Folder → MQL5 → Experts**, and copy `SmartHedgeEA_v5.7.mq5`
    there (or just copy the already-compiled `.ex5`).
 2. If you copied the `.mq5`: open **MetaEditor** (`F4`), open the file, press **F7** to compile.
    You should see `0 errors, 0 warnings`.
 3. Open a **demo account** chart (e.g. EURUSD) — one chart per symbol, one EA instance per
    chart. Works on any broker/account number and any screen size — nothing in the EA is tied to
-   the machine it was built on (see "New in v5.1" through "New in v5.6" above).
-4. Drag **SmartHedgeEA_v5.6** from the Navigator onto the chart (remove any older instance
+   the machine it was built on (see "New in v5.1" through "New in v5.7" above).
+4. Drag **SmartHedgeEA_v5.7** from the Navigator onto the chart (remove any older instance
    first). On the **Common** tab tick **Allow Algo Trading**. Check the **Inputs** tab, then OK.
 5. Make sure the **Algo Trading** button in the top toolbar is green.
 
@@ -327,23 +368,24 @@ decision CSV); `InpShowDashboard` (**true**).
    compiles clean, 0 errors/0 warnings; no backtest or forward test has been run yet).
 5. **"It's not trading" is usually not a bug.** Check the dashboard's MARKET section — "Last
    rejection" shows the exact reason the most recent candidate was turned down (e.g. the closed
-   candle didn't confirm the trend, or the signal score was below `InpMinSignalScore`). MODE A
-   needs H1+M15+M5 trend agreement **and** a confirming closed candle at the same time; that
-   combination can take hours to line up, not minutes — a quiet dashboard for a while is the EA
-   correctly waiting, not a sign it's stuck.
+   candle didn't confirm the trend, price was too far beyond the fast EMA, or the risk engine
+   declined). MODE A needs H1+M15+M5 trend agreement **and** a confirming closed candle at the
+   same time; that combination can take hours to line up, not minutes — a quiet dashboard for a
+   while is the EA correctly waiting, not a sign it's stuck. Turn on `InpLogDecisions` to get a
+   CSV row for every single evaluation if you want the full picture.
 
 ## Logs
 
 - **Trade CSV (always on by default):**
-  `MQL5\Files\SachinDevBotsLog\SmartReversalEA_v5_<symbol>_<magic>_<date>.csv` — one row per
-  closed position: basket id, direction, volume, entry/exit price & time, H1/M15/M5 trend,
-  RSI/ADX/ATR, signal score, regime, spread at entry/exit, basket risk, max floating loss/profit,
-  peak profit, close trigger & reason, request/final close timestamps, execution latency,
-  retcode, commission/swap/fee, net P/L, reversal status, final basket outcome.
-- **Decision CSV (`..._Decisions.csv`, OFF by default — `InpLogDecisions`):** every entry/reversal
-  evaluation, accepted or rejected, with its full 8-component score breakdown and the exact
-  rejection reason. Turn this on when you need to debug *why* the EA isn't entering; leave it off
-  for normal running so the log folder only ever has one CSV per run.
+  `MQL5\Files\SachinDevBotsLog\SmartReversalEA_v57_<symbol>_<magic>_<date>.csv` — one row per
+  closed position: basket id, direction, volume, entry/exit price & time, entry-TF/confirm-TF/
+  trend-TF direction, RSI/ADX/ATR, regime and mode captured at open, spread at entry/exit, basket
+  risk, close trigger & reason (from the closing deal's `DEAL_REASON`), request/final close
+  timestamps, execution latency, retcode, commission/swap/fee, net P/L, final basket outcome.
+- **Decision CSV (`..._Decisions.csv`, OFF by default — `InpLogDecisions`):** every entry
+  evaluation, accepted or rejected, with the regime, mode, the three TF directions, RSI/ADX/ATR,
+  spread and the exact rejection reason. Turn this on when you need to debug *why* the EA isn't
+  entering; leave it off for normal running so the log folder only ever has one CSV per run.
 - **Experts tab / log:** all `[INFO] [WARNING] [ERROR]` lines (keep `InpLogAlsoToExpertsTab` on).
   This is written to `MQL5\Logs\<YYYYMMDD>.log` **under the terminal's data folder**, e.g.
   `...\Terminal\<ID>\MQL5\Logs\<date>.log` — a **different file** from
@@ -357,57 +399,55 @@ decision CSV); `InpShowDashboard` (**true**).
 ## Dashboard
 
 On-chart panel (display-only), five sections, fixed readable text (9pt body / 11pt title) on every
-machine, panel width adapting a little to the chart (see "New in v5.1"), with
-`InpRequireCandleConfirm` off by default as of v5.2 so MODE A doesn't wait on one specific candle
-when the multi-timeframe trend already agrees (see "New in v5.2"):
-- **SYSTEM** — symbol, account mode, timeframes, EA state, running time.
-- **MARKET** — regime, H1/M15/M5 trend, RSI/ADX/ATR, spread, BUY/SELL score, last rejection
-  reason (wraps to a 2nd line if long, never cut off mid-word).
-- **TRADING** — basket direction/size/volume, average entry, floating P/L and peak, stop-loss,
-  trailing status, the basket's score/mode/regime.
+machine, panel width adapting a little to the chart (see "New in v5.1"):
+- **SYSTEM** — symbol, account mode, timeframes, EA state, model, running time.
+- **MARKET** — regime, H1/M15/M5 trend, RSI/ADX/ATR, spread, last rejection reason (wraps to a
+  2nd line if long, never cut off mid-word).
+- **TRADING** — basket direction/size/volume, average entry, basket risk, floating P/L, live
+  SL/TP prices, the 0.5 R exit shape and break-even status, and the regime/mode/RSI/ADX captured
+  when the basket opened.
 - **PERFORMANCE** — session baskets (win/loss/win-rate), net/gross/profit-factor, average
   winner/loser, expected value per basket, max consecutive wins/losses, today's and lifetime
-  basket totals, account drawdown.
-- **EXECUTION** — last order, last retcode, latency, partial-close status, last action or error
-  (also wraps to a 2nd line if long).
+  basket totals, account drawdown, daily/emergency status.
+- **EXECUTION** — last order, last retcode, latency, last action or error (also wraps to a 2nd
+  line if long).
 
 ## Honest limitations
 
-- Trend-following with reversals can **lose repeatedly in a sideways market** — MODE B exists to
-  reduce this, but it is not a guarantee.
-- "Breakout and retest confirmation" is implemented as a breakout-candle pattern check only, not
-  a full multi-bar retest state machine.
-- The optional economic-calendar filter is not reliably populated in the Strategy Tester; it
-  fails open (never blocks trading) rather than guess.
-- **No backtest or live forward-test results exist for v5.0 yet.** `TEST_REPORT_v5.0.md` lists
-  exactly what was verified (clean compile, static/logic review) and what wasn't (any backtest,
-  any forward test, any win-rate/profit-factor claim). Run your own before trusting it with
-  anything.
-- If the loss threshold is smaller than the current spread cost, baskets reverse immediately —
-  the EA warns about this in the Experts log at startup.
+- Trend-following can **lose repeatedly in a sideways market** — MODE B exists to reduce this,
+  but it is not a guarantee.
+- A 0.5 R shape needs a **66.7% win rate to break even**. Nothing in this code makes that happen;
+  it only makes the shape honest and identical on every trade.
+- **No backtest or live forward-test results exist for v5.7** (or any v5.x). `TEST_REPORT_v5.0.md`
+  lists exactly what was verified (clean compile, static/logic review) and what wasn't (any
+  backtest, any forward test, any win-rate/profit-factor claim). Run your own before trusting it
+  with anything.
+- The stop-loss is a price distance, not a fixed money amount: gaps, slippage, spread and tick
+  value all move the realized number away from the intended risk.
 - An `ERROR` state is deliberate: it stops trading and waits for manual review. Emergency stop
   cannot open a new position while in `ERROR`, it can only close a stray one.
 
 ## How to backtest it yourself
 
-1. In MT5 press `Ctrl+R` (Strategy Tester). Expert: **SmartHedgeEA_v5.6**, Symbol **EURUSD**,
+1. In MT5 press `Ctrl+R` (Strategy Tester). Expert: **SmartHedgeEA_v5.7**, Symbol **EURUSD**,
    Period **M5**.
 2. Model: **Every tick based on real ticks** (or *1-minute OHLC* for a quick run). Pick a
    chronological in-sample period, then a separate out-of-sample period — never the same dates
    twice. Deposit 2000 USD, leverage 1:500 is a reasonable starting point.
 3. Click **Start**. Check the Results/Backtest tabs and the CSV + decision log the EA wrote.
 4. Compare `InpSignalModel = TREND_ONLY` vs `RANGE_ONLY` vs `HYBRID` on the same dates, and
-   against the old v4.8 (from `Old Verson\`) as a baseline.
+   against the old v4.8 (from `Old Verson\`) as a baseline. Then vary `InpStopATRMult` /
+   `InpTargetATRMult` — the 0.5 R shape is the thing to test, not a score threshold that no
+   longer exists.
 
 ## Files
 
-- `SmartHedgeEA_v5.6.mq5` / `.ex5` — the EA (the latest version — this folder holds only the
+- `SmartHedgeEA_v5.7.mq5` / `.ex5` — the EA (the latest version — this folder holds only the
   latest version per project convention).
-- `Old Verson\` — every older version (v3.02 → v5.5) kept as backups, never edited or deleted.
+- `Old Verson\` — every older version (v3.02 → v5.6) kept as backups, never edited or deleted.
 - `TEST_REPORT_v5.0.md` — exactly what has and hasn't been verified for the v5.0x signal/risk
-  engine (still the current engine as of v5.6 — v5.1-v5.6 only changed logging/dashboard defaults,
-  one entry-filter default, one `OnInit` state-reset bug fix, one score-threshold default, the
-  basket-risk-cap fix, and one dashboard display fix, see "New in v5.1" through "New in v5.6").
+  engine. v5.7 replaced the exit and signal-gate layers on top of that engine; the verification
+  status (clean compile, no backtest, no forward test) is unchanged, see "New in v5.7".
 
 ---
 
